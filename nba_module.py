@@ -1,6 +1,16 @@
 from nba_api.stats.endpoints import playergamelog
 from nba_api.stats.static import players
 import pandas as pd
+import time
+
+HEADERS = {
+    'Host': 'stats.nba.com',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer': 'https://www.nba.com/',
+    'Connection': 'keep-alive',
+}
 
 def get_player_id(player_name: str):
     player_dict = players.get_players()
@@ -24,20 +34,13 @@ def get_player_games(player_name: str, season_type="Regular Season", last_n=15):
     try:
         logs = playergamelog.PlayerGameLog(
             player_id=player_id,
-            season="2026-27",
-            season_type_all_star=season_type
+            season="2025-26",  # Cambiamos temporalmente a la temporada anterior
+            season_type_all_star=season_type,
+            headers=HEADERS
         )
         df = logs.get_data_frames()[0]
-    except:
-        df = pd.DataFrame()
-    
-    if df.empty:
-        logs = playergamelog.PlayerGameLog(
-            player_id=player_id,
-            season="2025-26",
-            season_type_all_star=season_type
-        )
-        df = logs.get_data_frames()[0]
+    except Exception as e:
+        raise ValueError(f"Error al obtener datos: {str(e)}")
     
     if df.empty:
         return pd.DataFrame(), full_name
@@ -55,6 +58,11 @@ def is_double_double(row):
     count = sum(1 for cat in categories if row.get(cat, 0) >= 10)
     return 1 if count >= 2 else 0
 
+def is_triple_double(row):
+    categories = ['PTS', 'REB', 'AST', 'STL', 'BLK']
+    count = sum(1 for cat in categories if row.get(cat, 0) >= 10)
+    return 1 if count >= 3 else 0
+
 def analyze_prop(player_name: str, prop: str = "PTS", line: float = 20.5, last_n: int = 15):
     df, full_name = get_player_games(player_name, "Regular Season", last_n)
     
@@ -66,6 +74,9 @@ def analyze_prop(player_name: str, prop: str = "PTS", line: float = 20.5, last_n
     if prop == "DD":
         df["DD"] = df.apply(is_double_double, axis=1)
         value_col = "DD"
+    elif prop == "TD":
+        df["TD"] = df.apply(is_triple_double, axis=1)
+        value_col = "TD"
     elif prop == "MIN":
         value_col = "MIN"
     elif prop == "PRA":
