@@ -1,90 +1,129 @@
-import streamlit as st
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from nba_module import analyze_prop
-from visualizations import plot_prop_chart
+from pydantic import BaseModel
+import os
+import requests
+from openai import OpenAI
 
-st.set_page_config(page_title="HBA NBA", page_icon="🏀", layout="wide")
+app = FastAPI(title="HBA NBA Backend")
 
-st.title("🏀 HBA NBA - Analizador de Player Props")
-st.markdown("**Temporada 2026-27**")
-
-if "favorites" not in st.session_state:
-    st.session_state.favorites = []
-
-st.sidebar.header("⚙️ Configuración")
-
-if st.session_state.favorites:
-    fav_choice = st.sidebar.selectbox("Favoritos", ["-- Ninguno --"] + st.session_state.favorites)
-    if fav_choice != "-- Ninguno --":
-        player = st.sidebar.text_input("Nombre del Jugador", fav_choice)
-    else:
-        player = st.sidebar.text_input("Nombre del Jugador", "Jalen Brunson")
-else:
-    player = st.sidebar.text_input("Nombre del Jugador", "Jalen Brunson")
-
-# Nombres claros para los mercados
-market_options = {
-    "Puntos": "PTS",
-    "Rebotes": "REB",
-    "Asistencias": "AST",
-    "Puntos + Rebotes + Asistencias": "PRA",
-    "Puntos + Rebotes": "PR",
-    "Puntos + Asistencias": "PA",
-    "Rebotes + Asistencias": "RA",
-    "Triples Anotados": "FG3M",
-    "Robos": "STL",
-    "Tapones": "BLK",
-    "Pérdidas": "TOV",
-    "Tiros de Campo Anotados": "FGM",
-    "Tiros de Campo Intentados": "FGA",
-    "Minutos": "MIN",
-    "Double-Double": "DD",
-    "Triple-Double": "TD"
-}
-
-prop_display = st.sidebar.selectbox("Mercado", list(market_options.keys()))
-prop = market_options[prop_display]
-
-line = st.sidebar.selectbox(
-    "Línea",
-    options=[round(i + 0.5, 1) for i in range(0, 100)],
-    index=20
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-last_n = st.sidebar.slider("Últimos partidos", 5, 25, 12)
+client = OpenAI(
+    api_key=os.getenv("XAI_API_KEY"),
+    base_url="https://api.x.ai/v1",
+)
 
-col1, col2 = st.sidebar.columns(2)
-with col1:
-    if st.button("⭐ Guardar Favorito"):
-        if player and player not in st.session_state.favorites:
-            st.session_state.favorites.append(player)
-            st.success("Agregado a favoritos")
-with col2:
-    if st.button("🗑️ Limpiar Favoritos"):
-        st.session_state.favorites = []
+BIGBALLS_KEY = os.getenv("BIGBALLS_API_KEY", "")
+HEADERS = {"Authorization": f"Bearer {BIGBALLS_KEY}"}
+BASE_URL = "https://api.bigballsdata.com/v1"
 
-if st.sidebar.button("🔥 Analizar Jugador", type="primary"):
+class PropRequest(BaseModel):
+    player: str
+    prop: str
+    line: float
+    last_n: int = 12
+
+@app.get("/")
+def root():
+    return {"message": "HBA NBA Backend activo"}
+
+def get_upcoming_matchup(player_name: str):
+    """Intenta obtener el próximo partido del jugador (simplificado)"""
     try:
-        df, stats = analyze_prop(player, prop, line, last_n)
+        # Buscar partidos próximos de NBA
+        response = requests.get(
+            f"{BASE_URL}/matches",
+            headers=HEADERS,
+            params={"sport": "basketball", "league": "nba", "limit": 10}
+        )
+        if response.status_code != 200:
+            return None
         
-        st.success(f"✅ {stats['player']} analizado correctamente")
-        
-        col1, col2 = st.columns([2.5, 1])
-        
-        with col1:
-            plot_prop_chart(df, stats["value_col"], line, stats['player'])
-        
-        with col2:
-            st.metric("Promedio", stats['avg'])
-            st.metric("Hit Rate", f"{stats['hit_rate']}%")
-            st.metric("Partidos analizados", stats['games'])
-            
-        st.subheader("Últimos Partidos")
-        st.dataframe(
-            df[['GAME_DATE', 'MATCHUP', stats["value_col"], 'Over']], 
-            use_container_width=True
+        matches = response.json().get("data", [])
+        # Por ahora devolvemos el primer partido programado (puedes mejorar esto después)
+        for match in matches:
+            if match.get("status") == "scheduled":
+                return match
+        return matches[0] if matches else None
+    except:
+        return None
+
+def generate_ai_analysis(player: str, prop: str, line: float, avg: float, hit_rate: float, games: int, matchup=None):
+    hits = round((hit_rate / 100) * games)
+    
+    matchup_text = ""
+    if matchup:
+        home = matchup.get("home", {}).get("name", "Local")
+        away = matchup.get("away", {}).get("name", "Visitante")
+        matchup_text = f"\nPróximo partido: {away} vs {home}."
+
+    prompt = f"""Eres un analista de apuestas deportivas experto. 
+Analiza este prop de NBA de forma clara, natural y útil (máximo 5 líneas).
+
+Datos del jugador:
+- Jugador: {player}
+- Prop: {prop}
+- Línea: {line}
+- Promedio reciente: {avg}
+- Hit rate: {hit_rate}% ({hits} de {games} partidos)
+{matchup_text}
+
+Analiza:
+1. Si el promedio está por encima o por debajo de la línea.
+2. La consistencia (qué tan seguido supera la línea).
+3. El nivel de riesgo del pick.
+4. Menciona el próximo rival si tienes la información.
+5. Una conclusión breve y realista.
+
+No inventes estadísticas específicas de jugadores rivales si no las tienes."""
+
+    try:
+        response = client.chat.completions.create(
+            model="grok-4",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=220,
+            temperature=0.7
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"No se pudo generar análisis IA: {str(e)}"
+
+@app.post("/analyze")
+def analyze(request: PropRequest):
+    try:
+        df, stats = analyze_prop(
+            player_name=request.player,
+            prop=request.prop,
+            line=request.line,
+            last_n=request.last_n
         )
         
+        matchup = get_upcoming_matchup(request.player)
+        
+        ai_analysis = generate_ai_analysis(
+            player=stats["player"],
+            prop=request.prop,
+            line=request.line,
+            avg=stats["avg"],
+            hit_rate=stats["hit_rate"],
+            games=stats["games"],
+            matchup=matchup
+        )
+        
+        games = df.to_dict(orient='records')
+        
+        return {
+            "stats": stats,
+            "games": games,
+            "ai_analysis": ai_analysis
+        }
     except Exception as e:
-        st.error(str(e))
-
-st.caption("HBA NBA | Temporada 2026-27")
+        raise HTTPException(status_code=400, detail=str(e))
