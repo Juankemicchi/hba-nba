@@ -118,6 +118,14 @@ def analyze(request: PropRequest):
         
         games = df.to_dict(orient='records')
         
+        for game in games:
+            if 'opponent' not in game or not game['opponent']:
+                matchup_str = game.get('MATCHUP', '')
+                if isinstance(matchup_str, str) and matchup_str:
+                    game['opponent'] = matchup_str.split()[-1]
+                else:
+                    game['opponent'] = "Rival"
+        
         return {
             "stats": stats,
             "games": games,
