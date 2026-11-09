@@ -1,12 +1,13 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from nba_module import analyze_prop
+from football_module import get_team_stats, get_h2h
 from pydantic import BaseModel
 import os
 import requests
 from openai import OpenAI
 
-app = FastAPI(title="HBA NBA Backend")
+app = FastAPI(title="HBA Backend")
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,15 +26,27 @@ BIGBALLS_KEY = os.getenv("BIGBALLS_API_KEY", "")
 HEADERS = {"Authorization": f"Bearer {BIGBALLS_KEY}"}
 BASE_URL = "https://api.bigballsdata.com/v1"
 
+# ==================== MODELOS ====================
 class PropRequest(BaseModel):
     player: str
     prop: str
     line: float
     last_n: int = 12
 
+class FootballTeamRequest(BaseModel):
+    team: str
+    league_id: int = 39
+    season: int = 2025
+
+class FootballH2HRequest(BaseModel):
+    team1: str
+    team2: str
+    last: int = 10
+
+# ==================== NBA ====================
 @app.get("/")
 def root():
-    return {"message": "HBA NBA Backend activo", "ai": bool(os.getenv("XAI_API_KEY"))}
+    return {"message": "HBA Backend activo", "ai": bool(os.getenv("XAI_API_KEY"))}
 
 def get_upcoming_matchup(player_name: str):
     try:
@@ -44,7 +57,6 @@ def get_upcoming_matchup(player_name: str):
         )
         if response.status_code != 200:
             return None
-        
         matches = response.json().get("data", [])
         for match in matches:
             if match.get("status") == "scheduled":
@@ -55,7 +67,6 @@ def get_upcoming_matchup(player_name: str):
 
 def generate_ai_analysis(player: str, prop: str, line: float, avg: float, hit_rate: float, games: int, matchup=None):
     hits = round((hit_rate / 100) * games)
-    
     rival_info = ""
     if matchup:
         home = matchup.get("home", {}).get("name", "Local")
@@ -91,7 +102,6 @@ Sé directo, profesional y útil. No uses listas numeradas. Habla en un solo pá
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
-        print("Error Grok:", str(e))
         return f"Error al generar análisis: {str(e)}"
 
 @app.post("/analyze")
@@ -130,6 +140,31 @@ def analyze(request: PropRequest):
             "stats": stats,
             "games": games,
             "ai_analysis": ai_analysis
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+# ==================== FÚTBOL ====================
+@app.post("/football/team")
+def analyze_football_team(request: FootballTeamRequest):
+    try:
+        stats = get_team_stats(request.team, request.league_id, request.season)
+        if not stats or not stats.get("response"):
+            raise HTTPException(status_code=404, detail="No se encontraron datos del equipo")
+        return {"team": request.team, "stats": stats["response"]}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/football/h2h")
+def football_h2h(request: FootballH2HRequest):
+    try:
+        h2h = get_h2h(request.team1, request.team2, request.last)
+        if not h2h or not h2h.get("response"):
+            raise HTTPException(status_code=404, detail="No se encontró historial")
+        return {
+            "team1": request.team1,
+            "team2": request.team2,
+            "matches": h2h["response"]
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
